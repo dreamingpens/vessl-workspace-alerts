@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 import uuid
 
 from cryptography.fernet import Fernet
+from snapshot import SelectionError, parse_targets, validate_rows
 
 
 STATE_PATH = ".monitor/state.enc"
@@ -95,11 +96,11 @@ def snapshot():
         capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
     )
     if result.returncode:
+        if result.returncode == 2 and result.stderr.startswith("Selection error: "):
+            raise SelectionError(result.stderr.strip())
         raise RuntimeError("VESSL lookup failed")
     rows = json.loads(result.stdout)
-    wanted = {x.strip() for x in os.environ["VESSL_WORKSPACE_IDS"].split(",")}
-    if set(rows) != wanted:
-        raise ValueError("Incomplete VESSL response")
+    validate_rows(parse_targets(os.environ["VESSL_WORKSPACE_IDS"]), rows)
     return rows
 
 
@@ -154,6 +155,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except SelectionError as error:
+        sys.exit(str(error))
     except Exception:
         # HTTP exceptions can contain the secret webhook URL or API response.
         sys.exit("Monitor failed. Check VESSL/Slack credentials and repository write access. Saved alerts retry next run.")

@@ -1,0 +1,83 @@
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import Mock
+
+from monitor import transition
+from snapshot import SelectionError, collect_rows, list_candidates, parse_targets, validate_rows
+
+
+def workspace(wid, owner="alice", name="gpu-pod", status="running"):
+    return NS(id=wid, name=name, status=status, created_by=NS(username=owner))
+
+
+class SelectionTests(unittest.TestCase):
+    def test_mixed_selectors_and_whitespace(self):
+        self.assertEqual(parse_targets("123, alice/gpu-pod,123, bob / cpu-pod "),
+                         ["123", "alice/gpu-pod", "bob/cpu-pod"])
+
+    def test_invalid_selectors(self):
+        for value in ("", "gpu-pod", "123,", "/pod", "alice/", "a/b/c", "0", "１２３"):
+            with self.subTest(value=value), self.assertRaises(SelectionError):
+                parse_targets(value)
+
+    def test_numeric_only_does_not_list_other_workspaces(self):
+        listing = Mock(side_effect=AssertionError("Unexpected list request"))
+        rows = collect_rows(["123"], lambda wid: workspace(wid), listing)
+        self.assertEqual(set(rows), {"123"})
+        listing.assert_not_called()
+
+    def test_same_workspace_by_id_and_name_is_read_once(self):
+        read = Mock(return_value=workspace(123))
+        rows = collect_rows(["123", "alice/gpu-pod"], read, lambda: [workspace(123)])
+        self.assertEqual(set(rows), {"123"})
+        read.assert_called_once_with(123)
+
+    def test_owner_disambiguates_duplicate_names(self):
+        items = [workspace(123), workspace(456, owner="bob")]
+        rows = collect_rows(["bob/gpu-pod"], lambda wid: items[1], lambda: items)
+        self.assertEqual(set(rows), {"456"})
+
+    def test_missing_and_ambiguous_names_fail_before_detail_reads(self):
+        for items in ([], [workspace(123), workspace(456)]):
+            with self.subTest(items=items):
+                read = Mock()
+                with self.assertRaises(SelectionError):
+                    collect_rows(["alice/gpu-pod"], read, lambda: items)
+                read.assert_not_called()
+
+    def test_rename_during_lookup_is_rejected(self):
+        with self.assertRaises(SelectionError):
+            collect_rows(["alice/gpu-pod"], lambda wid: workspace(wid, name="renamed"),
+                         lambda: [workspace(123)])
+
+    def test_selector_change_retains_state_by_id(self):
+        initial = collect_rows(["123"], lambda wid: workspace(wid), lambda: [])
+        state = transition({}, initial)
+        stopped = workspace(123, status="stopped")
+        final = collect_rows(["alice/gpu-pod", "123"], lambda wid: stopped, lambda: [stopped])
+        self.assertEqual(len(transition(state, final)["pending"]), 1)
+
+    def test_incomplete_or_extra_snapshot_is_rejected(self):
+        rows = {"123": {"owner": "alice", "name": "gpu-pod", "status": "running"}}
+        with self.assertRaises(SelectionError):
+            validate_rows(["123", "bob/gpu-pod"], rows)
+        with self.assertRaises(ValueError):
+            validate_rows(["123"], dict(rows, **{"456": rows["123"]}))
+
+    def test_pagination_combines_own_and_others_without_duplicates(self):
+        def page(**kwargs):
+            mine, offset = kwargs["mine"], kwargs["offset"]
+            items = [workspace(123), workspace(456)] if mine else [workspace(456), workspace(789)]
+            return NS(results=items[offset:offset+1], page_info=NS(total_count=2))
+        api = NS(workspace_list_api=Mock(side_effect=page))
+        self.assertEqual({w.id for w in list_candidates(api, "example")}, {123, 456, 789})
+        self.assertEqual(api.workspace_list_api.call_count, 4)
+
+    def test_truncated_pagination_is_rejected(self):
+        api = NS(workspace_list_api=Mock(return_value=NS(results=[], page_info=NS(total_count=2))))
+        with self.assertRaises(ValueError):
+            list_candidates(api, "example")
+
+
+if __name__ == "__main__":
+    unittest.main()

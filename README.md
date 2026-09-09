@@ -29,7 +29,14 @@ Variable은 저장 후에도 값을 확인하고 수정할 수 있습니다.
 
 | Variable | 값 |
 | --- | --- |
-| `VESSL_WORKSPACE_IDS` | 감시할 workspace ID를 쉼표로 구분 |
+| `VESSL_WORKSPACE_IDS` | workspace ID 또는 `소유자/이름`을 쉼표로 구분. 혼합 가능 |
+
+예: `123456,alice/gpu-pod,bob/cpu-pod`처럼 입력합니다. 소유자는 VESSL의
+`Creator`에 표시되는 사용자 이름이며, workspace 이름은 대소문자까지 정확히 일치해야 합니다.
+같은 workspace를 ID와 `소유자/이름`으로 중복 등록해도 한 번만 감시합니다.
+Variable 이름은 기존 설정과 호환되도록 `VESSL_WORKSPACE_IDS`를 그대로 사용합니다.
+
+암호화 키 생성:
 
 ```bash
 python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
@@ -44,18 +51,22 @@ Actions → VESSL workspace stop alerts → Run workflow에서 `dry_run`을 켜�
 일반 실행이 한 번 성공해야 현재 상태가 기준으로 저장되고 감시가 시작됩니다.
 
 현재 로컬 VESSL CLI와 같은 버전의 공식 Python SDK를 사용합니다.
-표 형식 CLI 출력을 파싱하지 않고 지정한 ID를 하나씩 조회합니다.
+표 형식 CLI 출력을 파싱하지 않습니다. 숫자 ID는 직접 조회하고, `소유자/이름`은
+본인·다른 사용자 목록을 모두 확인해 ID로 해석한 다음 상세 조회합니다.
 
 ## 동작 및 한계
 
 - 처음부터 중지된 workspace는 알리지 않습니다. 실행 중인 상태를 한 번 관측한 후 중지되면 알립니다.
 - `running → stopping → stopped` 전환도 감지합니다.
 - 조회 실패·권한 오류·찾을 수 없는 workspace를 중지로 오인하지 않습니다. 실패한 실행은 Actions에 표시됩니다.
-- 감시 대상 하나라도 조회에 실패하면 그 실행의 상태는 갱신하지 않습니다. 삭제한 ID는 `VESSL_WORKSPACE_IDS` Variable에서 제거하세요.
+- 감시 대상 하나라도 조회에 실패하면 그 실행의 상태는 갱신하지 않습니다. 삭제하거나 이름을 바꾼 대상은 `VESSL_WORKSPACE_IDS` Variable에서 수정하세요.
+- `소유자/이름`이 없거나 여러 workspace와 일치하면 해당 항목 번호와 함께 오류를 표시합니다. 중복되는 경우 숫자 ID를 사용하세요.
+- 상태는 항상 ID로 저장하므로 같은 workspace의 등록 형식을 바꿔도 감지 이력이 유지됩니다.
+  같은 `소유자/이름`으로 새 workspace를 만들면 새 ID의 기준 상태부터 감시합니다.
 - 전송할 알림을 먼저 저장하고, Slack 전송 성공 뒤 지웁니다. 전송 실패는 다음 실행에 재시도합니다.
 - Slack 전송 직후 상태 저장 실패 또는 응답 유실이 발생하면 같은 알림이 다시 전송될 수 있습니다.
 - 이전 상태와 미전송 알림은 `.monitor/state.enc`에 Fernet으로 암호화해 커밋합니다.
-  감시 코드는 이름·상태를 공개 로그에 출력하지 않습니다. workspace ID는 Variable로 관리하며
+  감시 코드는 조회 결과의 이름·상태를 공개 로그에 출력하지 않습니다. 등록한 ID 또는 `소유자/이름`은 Variable로 관리하며
   workflow 환경 정보에 표시될 수 있습니다. 암호문 갱신 시각과 workflow 성공/실패도 공개됩니다.
 - 정기적인 상태 커밋이 저장소 활동을 유지합니다. 장기간 실패해 활동이 60일 없으면 공개 저장소의 예약 실행이 비활성화될 수 있습니다.
 - 암호화 키를 잃어버리면 기존 상태를 복구할 수 없습니다. 키 교체 시 상태를 별도로 마이그레이션하거나
@@ -67,13 +78,13 @@ Actions → VESSL workspace stop alerts → Run workflow에서 `dry_run`을 켜�
 
 ## 팀에서 같이 사용하기
 
-공용 Slack 채널의 Webhook 하나를 연결하고, 참여자의 workspace ID를
+공용 Slack 채널의 Webhook 하나를 연결하고, 참여자의 workspace ID 또는 `소유자/이름`을
 `VESSL_WORKSPACE_IDS` Variable에 추가하면 됩니다. 알림에는 workspace 이름과 소유자가 표시됩니다.
 조회에 사용하는 VESSL 계정은 등록된 모든 workspace에 접근할 수 있어야 합니다.
 각자의 VESSL 토큰을 모을 필요는 없습니다. 다른 조직은 별도 저장소/인증으로 운영하세요.
 
-새 workspace는 ID를 명시적으로 추가해야 합니다. 조직의 모든 workspace를 자동 감시하지 않습니다.
-참여자는 운영자에게 ID만 전달하면 되고, Secrets 관리 권한은 운영자만 가지고 있어도 됩니다.
+새 이름의 workspace는 감시 목록에 명시적으로 추가해야 합니다. 조직의 모든 workspace를 자동 감시하지 않습니다.
+참여자는 운영자에게 ID 또는 `소유자/이름`만 전달하면 되고, Secrets 관리 권한은 운영자만 가지고 있어도 됩니다.
 다른 팀은 이 저장소를 공개 저장소로 복사한 뒤 자체 Secrets와 Variable을 등록해 사용할 수 있습니다.
 
 ## 로컬 테스트
