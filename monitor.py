@@ -16,6 +16,7 @@ import uuid
 
 from cryptography.fernet import Fernet
 from snapshot import SelectionError, parse_targets, validate_rows
+from registrations import load_targets
 
 
 STATE_PATH = ".monitor/state.enc"
@@ -90,17 +91,22 @@ class GitHubState:
         self.sha = item["content"]["sha"]
 
 
-def snapshot():
+def snapshot(targets=None):
+    if targets is None:
+        targets = parse_targets(os.environ["VESSL_WORKSPACE_IDS"])
+    if not targets:
+        return {}
     result = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("snapshot.py"))],
         capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        env={**os.environ, "VESSL_WORKSPACE_IDS": ",".join(targets)},
     )
     if result.returncode:
         if result.returncode == 2 and result.stderr.startswith("Selection error: "):
             raise SelectionError(result.stderr.strip())
         raise RuntimeError("VESSL lookup failed")
     rows = json.loads(result.stdout)
-    validate_rows(parse_targets(os.environ["VESSL_WORKSPACE_IDS"]), rows)
+    validate_rows(targets, rows)
     return rows
 
 
@@ -157,13 +163,19 @@ def main():
         print("Slack acknowledged the test message (HTTP 200, ok).")
         return
     required = ["GH_TOKEN", "GITHUB_REPOSITORY", "STATE_ENCRYPTION_KEY",
-                "VESSL_ACCESS_TOKEN", "VESSL_DEFAULT_ORGANIZATION", "VESSL_WORKSPACE_IDS"]
+                "VESSL_ACCESS_TOKEN", "VESSL_DEFAULT_ORGANIZATION"]
     if not args.dry_run:
         required.append("SLACK_WEBHOOK_URL")
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
         sys.exit("Setup incomplete: configure repository settings (VESSL_WORKSPACE_IDS as a Variable; credentials as Secrets): " + ", ".join(missing))
-    process(GitHubState(), snapshot, send_slack, args.dry_run)
+    store = GitHubState()
+
+    def fetch_registered():
+        targets = load_targets(store.request, store.repo, os.environ.get("VESSL_WORKSPACE_IDS", ""))
+        return snapshot(targets)
+
+    process(store, fetch_registered, send_slack, args.dry_run)
 
 
 if __name__ == "__main__":
