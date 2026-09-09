@@ -23,19 +23,21 @@ STATE_PATH = ".monitor/state.enc"
 
 
 def transition(state, rows):
-    """Keep the running latch through intermediate states; queue each stop once."""
+    """Queue first-observed stops and later running-to-stopped transitions once."""
     result = copy.deepcopy(state)
     watches = result.setdefault("workspaces", {})
     pending = result.setdefault("pending", [])
     for wid, row in rows.items():
+        first_observation = wid not in watches
         watch = watches.setdefault(wid, {"armed": False})
         if row["status"] == "running":
             watch["armed"] = True
-        elif row["status"] == "stopped" and watch["armed"]:
+        elif row["status"] == "stopped" and (first_observation or watch["armed"]):
             pending.append({
                 "event_id": str(uuid.uuid4()), "id": wid, "name": row["name"],
                 "owner": row.get("owner", ""),
                 "detected_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "initial_stopped" if first_observation else "stopped_transition",
             })
             watch["armed"] = False
     # Removed targets cannot inherit an old running latch if re-added later.
@@ -123,13 +125,18 @@ def post_slack(text):
 
 
 def send_slack(events):
-    lines = ["🔴 VESSL 워크스페이스 중지 감지"]
+    lines = ["🔴 VESSL 워크스페이스 중지 상태 알림"]
     for event in events:
+        reason = ("등록 후 첫 확인에서 이미 중지된 상태입니다."
+                  if event.get("reason") == "initial_stopped"
+                  else "실행 중이었던 워크스페이스의 중지를 확인했습니다.")
         lines.append(f"• {html.escape(event['name'])} (ID: {event['id']}) — stopped\n"
+                     f"  {reason}\n"
                      f"  소유자: {html.escape(event.get('owner', ''))}\n"
                      f"  감지 시각(UTC): {event['detected_at']}")
     lines.append("1시간 간격으로 확인합니다. 표시 시각은 실제 중지 시각이 아닌 감지 시각입니다.")
     post_slack("\n".join(lines))
+    print(f"Slack acknowledged {len(events)} workspace alert(s) (HTTP 200, ok).")
 
 
 def process(store, fetch, send, dry_run=False):
