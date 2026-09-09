@@ -38,7 +38,7 @@ jobs:
           STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
           VESSL_ACCESS_TOKEN: ${{ secrets.VESSL_ACCESS_TOKEN }}
           VESSL_DEFAULT_ORGANIZATION: ${{ secrets.VESSL_DEFAULT_ORGANIZATION }}
-          VESSL_WORKSPACE_IDS: ${{ secrets.VESSL_WORKSPACE_IDS }}
+          VESSL_WORKSPACE_IDS: ${{ vars.VESSL_WORKSPACE_IDS }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           VESSL_SAVE_CONFIG: 'false'
           DRY_RUN: ${{ inputs.dry_run || 'false' }}

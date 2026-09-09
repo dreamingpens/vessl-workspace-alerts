@@ -147,7 +147,7 @@ def main():
         required.append("SLACK_WEBHOOK_URL")
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
-        sys.exit("Setup incomplete: add repository Secrets: " + ", ".join(missing))
+        sys.exit("Setup incomplete: configure repository settings (VESSL_WORKSPACE_IDS as a Variable; credentials as Secrets): " + ", ".join(missing))
     process(GitHubState(), snapshot, send_slack, args.dry_run)
 
 
