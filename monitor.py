@@ -104,22 +104,26 @@ def snapshot():
     return rows
 
 
-def send_slack(events):
+def post_slack(text):
     webhook = os.environ["SLACK_WEBHOOK_URL"]
     parsed = urlparse(webhook)
     if parsed.scheme != "https" or parsed.hostname != "hooks.slack.com" or not parsed.path.startswith("/services/"):
         raise ValueError("Invalid Slack webhook")
+    req = Request(webhook, data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(req, timeout=25) as response:
+        if response.status != 200 or response.read().strip() != b"ok":
+            raise RuntimeError("Slack did not acknowledge the message")
+
+
+def send_slack(events):
     lines = ["🔴 VESSL 워크스페이스 중지 감지"]
     for event in events:
         lines.append(f"• {html.escape(event['name'])} (ID: {event['id']}) — stopped\n"
                      f"  소유자: {html.escape(event.get('owner', ''))}\n"
                      f"  감지 시각(UTC): {event['detected_at']}")
     lines.append("1시간 간격으로 확인합니다. 표시 시각은 실제 중지 시각이 아닌 감지 시각입니다.")
-    req = Request(webhook, data=json.dumps({"text": "\n".join(lines)}).encode(),
-                  headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(req, timeout=25) as response:
-        if response.status != 200 or response.read().strip() != b"ok":
-            raise RuntimeError("Slack did not acknowledge the message")
+    post_slack("\n".join(lines))
 
 
 def process(store, fetch, send, dry_run=False):
@@ -140,8 +144,18 @@ def process(store, fetch, send, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--test-slack", action="store_true")
     args = parser.parse_args()
+    if args.test_slack:
+        if not os.environ.get("SLACK_WEBHOOK_URL"):
+            sys.exit("Setup incomplete: add the SLACK_WEBHOOK_URL repository Secret.")
+        post_slack("🧪 VESSL 알림 연결 테스트\n"
+                   "이 메시지는 Slack 연결 확인용 테스트 알림입니다.\n"
+                   "워크스페이스 중지 알림도 이 채널로 전달됩니다.")
+        print("Slack acknowledged the test message (HTTP 200, ok).")
+        return
     required = ["GH_TOKEN", "GITHUB_REPOSITORY", "STATE_ENCRYPTION_KEY",
                 "VESSL_ACCESS_TOKEN", "VESSL_DEFAULT_ORGANIZATION", "VESSL_WORKSPACE_IDS"]
     if not args.dry_run:

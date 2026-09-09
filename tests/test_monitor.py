@@ -1,8 +1,9 @@
 import copy
+import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from monitor import process, transition
+from monitor import main, post_slack, process, transition
 
 
 def rows(status):
@@ -23,6 +24,37 @@ class Store:
 
 
 class MonitorTests(unittest.TestCase):
+    def test_slack_test_only_sends_one_message_without_state_access(self):
+        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "configured"}, clear=True), \
+             patch("sys.argv", ["monitor.py", "--test-slack"]), \
+             patch("monitor.post_slack") as post, patch("monitor.GitHubState") as store, \
+             patch("monitor.snapshot") as fetch:
+            main()
+        post.assert_called_once()
+        self.assertIn("테스트", post.call_args.args[0])
+        store.assert_not_called()
+        fetch.assert_not_called()
+
+    def test_slack_http_payload_and_acknowledgment(self):
+        response = Mock(status=200)
+        response.read.return_value = b"ok"
+        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/example"}), \
+             patch("monitor.urlopen") as request:
+            request.return_value.__enter__.return_value = response
+            post_slack("test message")
+            self.assertEqual(json.loads(request.call_args.args[0].data), {"text": "test message"})
+            response.read.return_value = b"invalid_payload"
+            with self.assertRaises(RuntimeError):
+                post_slack("test message")
+
+    def test_slack_test_requires_webhook(self):
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("sys.argv", ["monitor.py", "--test-slack"]), \
+             patch("monitor.post_slack") as post:
+            with self.assertRaisesRegex(SystemExit, "SLACK_WEBHOOK_URL"):
+                main()
+        post.assert_not_called()
+
     def test_initial_stopped_is_baseline(self):
         self.assertEqual(transition({}, rows("stopped"))["pending"], [])
 

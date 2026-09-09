@@ -50,6 +50,10 @@ Actions → VESSL workspace stop alerts → Run workflow에서 `dry_run`을 켜�
 인증·상태 복호화·실제 workspace 조회만 검증합니다. 메시지와 상태 저장은 하지 않습니다.
 일반 실행이 한 번 성공해야 현재 상태가 기준으로 저장되고 감시가 시작됩니다.
 
+Slack 연결만 테스트하려면 **Run workflow → `test_slack` 체크 → 실행**합니다.
+`dry_run`은 체크하지 마세요. 연결 확인용 메시지를 한 건 전송하며,
+workspace를 조회하거나 이전 감시 상태를 바꾸지 않습니다.
+
 현재 로컬 VESSL CLI와 같은 버전의 공식 Python SDK를 사용합니다.
 표 형식 CLI 출력을 파싱하지 않습니다. 숫자 ID는 직접 조회하고, `소유자/이름`은
 본인·다른 사용자 목록을 모두 확인해 ID로 해석한 다음 상세 조회합니다.

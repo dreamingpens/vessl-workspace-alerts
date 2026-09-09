@@ -9,6 +9,10 @@ on:
         description: 'Read-only verification: no messages or state changes'
         type: boolean
         default: false
+      test_slack:
+        description: 'Send one Slack connection test message (leave dry_run unchecked)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -42,8 +46,15 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           VESSL_SAVE_CONFIG: 'false'
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          TEST_SLACK: ${{ inputs.test_slack || 'false' }}
         run: |
-          if [ "$DRY_RUN" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ] && [ "$TEST_SLACK" = "true" ]; then
+            echo 'Choose either dry_run or test_slack.'
+            exit 1
+          fi
+          if [ "$TEST_SLACK" = "true" ]; then
+            python monitor.py --test-slack
+          elif [ "$DRY_RUN" = "true" ]; then
             python monitor.py --dry-run
           else
             python monitor.py
