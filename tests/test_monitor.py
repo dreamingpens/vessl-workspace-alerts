@@ -1,9 +1,10 @@
 import copy
 import json
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from monitor import main, post_slack, process, send_slack, transition
+from monitor import main, post_slack, process, send_slack, start_workspace, transition
 
 
 def rows(status):
@@ -24,6 +25,75 @@ class Store:
 
 
 class MonitorTests(unittest.TestCase):
+    def setUp(self):
+        # Existing notification tests must never invoke a real workspace start.
+        patcher = patch("monitor.start_workspace")
+        self.start = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_stopped_targets_start_on_every_check_even_without_new_alert(self):
+        store = Store(transition({}, rows("stopped")))
+        store.state["pending"].clear()
+        send = Mock()
+        process(store, lambda: rows("stopped"), send)
+        process(store, lambda: rows("stopped"), send)
+        self.assertEqual(self.start.call_count, 2)
+        self.start.assert_called_with("123")
+        send.assert_not_called()
+
+    def test_only_currently_stopped_targets_start(self):
+        for status in ("running", "stopping", "pending", "queued", "initializing", "error", "unknown"):
+            with self.subTest(status=status):
+                store = Store(transition({}, rows("stopped")))
+                process(store, lambda: rows(status), Mock())
+        process(Store({}), lambda: {}, Mock())
+        self.start.assert_not_called()
+
+    def test_start_failure_does_not_block_other_targets_or_alert_delivery(self):
+        current = {**rows("stopped"), "456": {"name": "second", "status": "stopped"}}
+        self.start.side_effect = [RuntimeError("private API response"), None]
+        store, send = Store({}), Mock()
+        with self.assertRaisesRegex(RuntimeError, "stopped targets retry"):
+            process(store, lambda: current, send)
+        self.assertEqual([call.args[0] for call in self.start.call_args_list], ["123", "456"])
+        events = send.call_args.args[0]
+        self.assertEqual([event["start_result"] for event in events], ["failed", "requested"])
+        self.assertEqual(store.state["pending"], [])
+        self.start.side_effect = None
+        process(store, lambda: current, send)
+        self.assertEqual(self.start.call_count, 4)
+
+    def test_start_precedes_slack_and_state_write_failures(self):
+        for failure in ("save", "send"):
+            with self.subTest(failure=failure):
+                store, send = Store({}), Mock()
+                if failure == "save":
+                    store.save = Mock(side_effect=TimeoutError)
+                else:
+                    send.side_effect = TimeoutError
+                self.start.reset_mock()
+                with self.assertRaises(TimeoutError):
+                    process(store, lambda: rows("stopped"), send)
+                self.start.assert_called_once_with("123")
+
+    def test_old_pending_alert_does_not_inherit_new_start_result(self):
+        store = Store(transition({}, rows("stopped")))
+        pending = copy.deepcopy(store.state["pending"])
+        send = Mock()
+        process(store, lambda: rows("stopped"), send)
+        send.assert_called_once_with(pending)
+
+    def test_slack_reports_request_outcome_without_claiming_running(self):
+        event = transition({}, rows("stopped"))["pending"][0]
+        with patch("monitor.post_slack") as post:
+            event["start_result"] = "requested"
+            send_slack([event])
+            self.assertIn("CLI 시작 요청 성공", post.call_args.args[0])
+            self.assertIn("실행 완료 여부는 다음", post.call_args.args[0])
+            event["start_result"] = "failed"
+            send_slack([event])
+            self.assertIn("CLI 시작 요청 실패", post.call_args.args[0])
+
     def test_slack_test_only_sends_one_message_without_state_access(self):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "configured"}, clear=True), \
              patch("sys.argv", ["monitor.py", "--test-slack"]), \
@@ -34,6 +104,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("테스트", post.call_args.args[0])
         store.assert_not_called()
         fetch.assert_not_called()
+        self.start.assert_not_called()
 
     def test_slack_http_payload_and_acknowledgment(self):
         response = Mock(status=200)
@@ -125,6 +196,7 @@ class MonitorTests(unittest.TestCase):
             process(store, Mock(side_effect=TimeoutError), send)
         self.assertEqual(store.saves, 0)
         send.assert_not_called()
+        self.start.assert_not_called()
 
     def test_failed_slack_delivery_retries_even_after_restart(self):
         store = Store(transition({}, rows("running")))
@@ -143,6 +215,7 @@ class MonitorTests(unittest.TestCase):
         process(store, lambda: rows("stopped"), send, dry_run=True)
         self.assertEqual(store.saves, 0)
         send.assert_not_called()
+        self.start.assert_not_called()
 
     def test_removed_workspace_is_not_armed_when_readded(self):
         state = transition({}, rows("running"))
@@ -150,6 +223,33 @@ class MonitorTests(unittest.TestCase):
         pending = transition(state, rows("stopped"))["pending"]
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["reason"], "initial_stopped")
+
+
+class StartWorkspaceTests(unittest.TestCase):
+    def test_cli_uses_explicit_id_and_noninteractive_private_output(self):
+        with patch("monitor.subprocess.run", return_value=Mock(returncode=0)) as run:
+            start_workspace("123")
+        self.assertEqual(run.call_args.args[0], ["vessl", "workspace", "start", "123"])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertEqual(run.call_args.kwargs["env"]["VESSL_SAVE_CONFIG"], "false")
+
+    def test_cli_failures_are_sanitized(self):
+        for error in (None, FileNotFoundError("private"),
+                      subprocess.TimeoutExpired("private", 60, output="private")):
+            with self.subTest(error=error), patch("monitor.subprocess.run", side_effect=error,
+                                                return_value=Mock(returncode=1, stderr="private")):
+                with self.assertRaises(RuntimeError) as raised:
+                    start_workspace("123")
+                self.assertNotIn("private", str(raised.exception))
+
+    def test_invalid_id_never_invokes_cli(self):
+        with patch("monitor.subprocess.run") as run:
+            for wid in ("", "--help", "123; echo secret", "alice/gpu", "0"):
+                with self.assertRaises(ValueError):
+                    start_workspace(wid)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Read-only verification: no messages or state changes'
+        description: 'Read-only verification: no starts, messages or state changes'
         type: boolean
         default: false
       test_slack:
@@ -35,9 +35,9 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies without cache or artifact storage
         run: python -m pip install --disable-pip-version-check --no-cache-dir -r requirements.txt
-      - name: Test notification state handling
+      - name: Test notifications and automatic starts
         run: python -m unittest discover -s tests -v
-      - name: Check workspace state
+      - name: Check workspace state and start stopped targets
         env:
           GH_TOKEN: ${{ github.token }}
           STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}

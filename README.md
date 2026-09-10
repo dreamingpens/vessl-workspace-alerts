@@ -1,7 +1,8 @@
-# VESSL workspace → Slack
+# VESSL workspace 자동 시작 + Slack 알림
 
 VESSL workspace가 실행 중이었다가 `stopped`가 되면 Slack으로 알립니다.
 새로 등록한 workspace가 첫 확인부터 `stopped`여도 한 번 알립니다.
+등록된 workspace가 `stopped`이면 감지 직후 `vessl workspace start ID`로 자동 시작을 요청합니다.
 매시간 17분에 GitHub Actions가 확인합니다. 서버를 직접 운영할 필요가 없습니다.
 
 ## 비용 0원 구성
@@ -9,8 +10,8 @@ VESSL workspace가 실행 중이었다가 `stopped`가 되면 Slack으로 알립
 - **공개 저장소 + 무료 GitHub 표준 `ubuntu-latest` 러너**만 사용합니다.
 - 비공개 저장소로 변경하면 job을 건너뛰도록 설정했습니다.
 - 유료 서버, 대형 러너, Actions cache/artifact 저장소를 사용하지 않습니다.
-- 기존 VESSL workspace의 상태만 조회합니다. 생성·시작·중지 명령을 실행하지 않습니다.
-- 기존 VESSL workspace 자체의 사용료는 이 알림 프로그램과 별개입니다.
+- 등록된 VESSL workspace의 상태를 조회하고, `stopped`이면 CLI 시작 명령을 실행합니다.
+- 무료 구성은 감시용 GitHub Actions 기준이며, 자동 시작된 VESSL workspace 자체의 사용료는 별개입니다.
 
 [GitHub Actions 요금 문서](https://docs.github.com/en/actions/concepts/billing-and-usage)
 
@@ -48,7 +49,7 @@ URL은 저장소 Secret 입력창에 직접 입력하세요. 코드나 이슈에
 [Slack 설정 가이드](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)
 
 Actions → VESSL workspace stop alerts → Run workflow에서 `dry_run`을 켜면
-인증·상태 복호화·실제 workspace 조회만 검증합니다. 메시지와 상태 저장은 하지 않습니다.
+인증·상태 복호화·실제 workspace 조회만 검증합니다. 시작 명령, 메시지와 상태 저장은 하지 않습니다.
 일반 실행이 한 번 성공해야 현재 상태가 기준으로 저장되고 감시가 시작됩니다.
 
 Slack 연결만 테스트하려면 **Run workflow → `test_slack` 체크 → 실행**합니다.
@@ -58,23 +59,34 @@ workspace를 조회하거나 이전 감시 상태를 바꾸지 않습니다.
 현재 로컬 VESSL CLI와 같은 버전의 공식 Python SDK를 사용합니다.
 표 형식 CLI 출력을 파싱하지 않습니다. 숫자 ID는 직접 조회하고, `소유자/이름`은
 본인·다른 사용자 목록을 모두 확인해 ID로 해석한 다음 상세 조회합니다.
+시작 요청은 같은 인증 환경의 공식 CLI 명령
+[`vessl workspace start ID`](https://docs.vessl.ai/reference/cli/workspace)로 실행합니다.
 
 ## 동작 및 한계
 
+- 현재 조회에서 `stopped`인 등록 대상마다 즉시 CLI 시작을 요청합니다. 알림 이력이 있어도 시작을 시도하며,
+  다음 확인에서도 `stopped`이면 재시도합니다. `stopping`, `running`, `pending` 등 다른 상태에는 시작하지 않습니다.
+- CLI 시작 요청은 Slack 전송과 상태 저장보다 먼저 실행합니다. 한 대상의 시작 요청 실패는 다른 대상의 시작이나
+  중지 알림 전송을 막지 않으며, 해당 Actions 실행은 실패로 표시됩니다. 요청별 제한 시간은 60초입니다.
+- 새 중지 알림에는 CLI 시작 요청 성공 또는 실패를 표시합니다. 요청 성공은 `running` 도달을 보장하지 않으며,
+  실제 상태는 다음 정기 조회에서 확인합니다. 이전에 저장된 미전송 알림에는 과거 감지 내용을 그대로 유지합니다.
+- 수동으로 중지해도 감시 목록에 있으면 다시 시작합니다. 중지 상태를 유지하려면 Variable 및 승인 이슈에서 감시를 해제하세요.
+- **감지 직후 시작**하며, 확인 주기는 기존대로 매시간 17분입니다. 실시간 감시는 아니며 예약 실행은 지연될 수 있습니다.
 - 새 대상이 첫 확인부터 `stopped`이면 **등록 후 첫 확인에서 이미 중지된 상태**라고 한 번 알립니다.
   계속 중지 상태인 동안에는 반복하지 않으며, 이후 `running`을 확인한 뒤 다시 중지되면 새로 알립니다.
   기존 버전에서 이미 기준 상태를 저장한 중지 대상은 소급해서 알리지 않습니다.
   감시에서 제거되어 상태가 정리된 뒤 재등록하면 새 대상의 첫 확인으로 처리합니다.
 - `running → stopping → stopped` 전환도 감지합니다.
 - 조회 실패·권한 오류·찾을 수 없는 workspace를 중지로 오인하지 않습니다. 실패한 실행은 Actions에 표시됩니다.
-- 감시 대상 하나라도 조회에 실패하면 그 실행의 상태는 갱신하지 않습니다. 삭제하거나 이름을 바꾼 대상은 `VESSL_WORKSPACE_IDS` Variable에서 수정하세요.
+- 감시 대상 하나라도 조회에 실패하면 그 실행에서는 시작 명령과 상태 갱신을 하지 않습니다. 삭제하거나 이름을 바꾼 대상은 `VESSL_WORKSPACE_IDS` Variable에서 수정하세요.
 - `소유자/이름`이 없거나 여러 workspace와 일치하면 해당 항목 번호와 함께 오류를 표시합니다. 중복되는 경우 숫자 ID를 사용하세요.
 - 상태는 항상 ID로 저장하므로 같은 workspace의 등록 형식을 바꿔도 감지 이력이 유지됩니다.
   같은 `소유자/이름`으로 새 workspace를 만들면 새 ID의 기준 상태부터 감시합니다.
 - 전송할 알림을 먼저 저장하고, Slack 전송 성공 뒤 지웁니다. 전송 실패는 다음 실행에 재시도합니다.
 - Slack 전송 직후 상태 저장 실패 또는 응답 유실이 발생하면 같은 알림이 다시 전송될 수 있습니다.
 - 이전 상태와 미전송 알림은 `.monitor/state.enc`에 Fernet으로 암호화해 커밋합니다.
-  감시 코드는 조회 결과의 이름·상태를 공개 로그에 출력하지 않습니다. 등록한 ID 또는 `소유자/이름`은 Variable로 관리하며
+  감시 코드는 조회 결과의 이름·상태와 CLI 출력을 공개 로그에 출력하지 않습니다. 시작 요청 성공/실패 건수만 출력합니다.
+  등록한 ID 또는 `소유자/이름`은 Variable로 관리하며
   workflow 환경 정보에 표시될 수 있습니다. 암호문 갱신 시각과 workflow 성공/실패도 공개됩니다.
 - 정기적인 상태 커밋이 저장소 활동을 유지합니다. 장기간 실패해 활동이 60일 없으면 공개 저장소의 예약 실행이 비활성화될 수 있습니다.
 - 암호화 키를 잃어버리면 기존 상태를 복구할 수 없습니다. 키 교체 시 상태를 별도로 마이그레이션하거나
@@ -88,7 +100,7 @@ workspace를 조회하거나 이전 감시 상태를 바꾸지 않습니다.
 
 공용 Slack 채널의 Webhook 하나를 연결하고, 참여자의 workspace ID 또는 `소유자/이름`을
 `VESSL_WORKSPACE_IDS` Variable에 추가하면 됩니다. 알림에는 workspace 이름과 소유자가 표시됩니다.
-조회에 사용하는 VESSL 계정은 등록된 모든 workspace에 접근할 수 있어야 합니다.
+VESSL 계정은 등록된 모든 workspace를 조회하고 시작할 수 있어야 합니다.
 각자의 VESSL 토큰을 모을 필요는 없습니다. 다른 조직은 별도 저장소/인증으로 운영하세요.
 
 새 이름의 workspace는 감시 목록에 명시적으로 추가해야 합니다. 조직의 모든 workspace를 자동 감시하지 않습니다.
@@ -105,6 +117,7 @@ workspace를 조회하거나 이전 감시 상태를 바꾸지 않습니다.
    `/watch 123456`을 한 줄로 남기면 승인됩니다. 이 저장소에서는 `dreamingpens`만 승인할 수 있습니다.
 4. 다음 정기 실행부터 기존 Variable의 대상과 합쳐서 감시합니다. 정기 실행은 매시간 17분이며 지연될 수 있습니다.
    첫 확인에서 이미 중지된 상태면 한 번 알립니다. 이후 실행 중인 상태를 확인한 뒤 다시 중지되면 또 알립니다.
+   현재 상태가 `stopped`이면 알림 이력과 관계없이 CLI로 자동 시작을 요청합니다.
 
 이슈가 **열려 있고** `workspace-registration` 라벨이 있어야 신청이 유지됩니다.
 취소하려면 이슈를 닫거나 운영자가 새 댓글에 `/unwatch`를 적습니다.
