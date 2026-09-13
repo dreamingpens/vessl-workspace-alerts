@@ -23,8 +23,9 @@ from registrations import load_targets
 STATE_PATH = ".monitor/state.enc"
 
 
-def transition(state, rows):
-    """Queue first-observed stops and later running-to-stopped transitions once."""
+def transition(state, rows, now=None):
+    """Queue stop and low remaining-time notifications once per episode."""
+    now = now if now is not None else datetime.now(timezone.utc)
     result = copy.deepcopy(state)
     watches = result.setdefault("workspaces", {})
     pending = result.setdefault("pending", [])
@@ -33,6 +34,25 @@ def transition(state, rows):
         watch = watches.setdefault(wid, {"armed": False})
         if row["status"] == "running":
             watch["armed"] = True
+            deadline = row.get("scheduled_termination_dt")
+            if deadline:
+                try:
+                    deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+                    remaining = (deadline - now).total_seconds() if deadline.tzinfo else None
+                except (ValueError, TypeError, AttributeError):
+                    remaining = None
+                if remaining is not None:
+                    if remaining >= 5 * 3600:
+                        watch.pop("low_time_alerted", None)
+                    elif not watch.get("low_time_alerted"):
+                        pending.append({
+                            "event_id": str(uuid.uuid4()), "id": wid, "name": row["name"],
+                            "owner": row.get("owner", ""), "detected_at": now.isoformat(),
+                            "reason": "low_remaining_time",
+                            "remaining_seconds": max(0, remaining),
+                            "scheduled_termination_dt": deadline.isoformat(),
+                        })
+                        watch["low_time_alerted"] = True
         elif row["status"] == "stopped" and (first_observation or watch["armed"]):
             pending.append({
                 "event_id": str(uuid.uuid4()), "id": wid, "name": row["name"],
@@ -41,6 +61,8 @@ def transition(state, rows):
                 "reason": "initial_stopped" if first_observation else "stopped_transition",
             })
             watch["armed"] = False
+        if row["status"] == "stopped":
+            watch.pop("low_time_alerted", None)
     # Removed targets cannot inherit an old running latch if re-added later.
     result["workspaces"] = {wid: watches[wid] for wid in rows}
     result["version"] = 1
@@ -142,8 +164,16 @@ def start_workspace(wid):
 
 
 def send_slack(events):
-    lines = ["🔴 VESSL 워크스페이스 중지 상태 알림"]
+    lines = ["🔔 VESSL 워크스페이스 알림"]
     for event in events:
+        if event.get("reason") == "low_remaining_time":
+            minutes = int(event["remaining_seconds"] // 60)
+            lines.append(f"• {html.escape(event['name'])} (ID: {event['id']}) — ⏳ 남은 시간 5시간 미만\n"
+                         f"  남은 시간: {minutes // 60}시간 {minutes % 60}분\n"
+                         f"  종료 예정 시각: {event['scheduled_termination_dt']}\n"
+                         f"  소유자: {html.escape(event.get('owner', ''))}\n"
+                         f"  감지 시각(UTC): {event['detected_at']}")
+            continue
         reason = ("등록 후 첫 확인에서 이미 중지된 상태입니다."
                   if event.get("reason") == "initial_stopped"
                   else "실행 중이었던 워크스페이스의 중지를 확인했습니다.")
@@ -155,7 +185,7 @@ def send_slack(events):
             lines.append("  자동 시작: CLI 시작 요청 성공 (실행 완료 여부는 다음 상태 확인에서 확인합니다).")
         elif event.get("start_result") == "failed":
             lines.append("  자동 시작: CLI 시작 요청 실패 또는 시간 초과. 다음 확인에서도 stopped이면 재시도합니다.")
-    lines.append("1시간 간격으로 확인합니다. 표시 시각은 실제 중지 시각이 아닌 감지 시각입니다.")
+    lines.append("1시간 간격으로 확인합니다. 남은 시간은 감지 시점 기준이며, 감지 시각은 실제 중지 시각과 다를 수 있습니다.")
     post_slack("\n".join(lines))
     print(f"Slack acknowledged {len(events)} workspace alert(s) (HTTP 200, ok).")
 

@@ -3,6 +3,7 @@
 The parent captures all output; workspace details must never reach Actions logs.
 """
 import contextlib
+from datetime import datetime
 import io
 import json
 import os
@@ -108,6 +109,10 @@ def collect_rows(targets, read, list_all):
             raise ValueError("Workspace ID mismatch")
         rows[wid] = {"name": item.name, "status": item.status.lower(),
                      "owner": item.created_by.username}
+        deadline = getattr(item, "scheduled_termination_dt", None)
+        rows[wid]["scheduled_termination_dt"] = (
+            deadline.isoformat() if isinstance(deadline, datetime) else deadline
+        )
     # Re-check owner/name after detail reads in case a workspace was renamed.
     validate_rows(targets, rows)
     return rows

@@ -1,4 +1,5 @@
 from types import SimpleNamespace as NS
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import Mock
 
@@ -11,6 +12,12 @@ def workspace(wid, owner="alice", name="gpu-pod", status="running"):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_scheduled_termination_datetime_is_json_serializable(self):
+        item = workspace(123)
+        item.scheduled_termination_dt = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        result = collect_rows(["123"], lambda wid: item, lambda: [])
+        self.assertEqual(result["123"]["scheduled_termination_dt"], "2026-09-13T00:00:00+00:00")
+
     def test_mixed_selectors_and_whitespace(self):
         self.assertEqual(parse_targets("123, alice/gpu-pod,123, bob / cpu-pod "),
                          ["123", "alice/gpu-pod", "bob/cpu-pod"])

@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timedelta, timezone
 import json
 import subprocess
 import unittest
@@ -25,6 +26,49 @@ class Store:
 
 
 class MonitorTests(unittest.TestCase):
+    def test_low_time_boundary_deduplication_extension_and_restart(self):
+        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        current = rows("running")
+        def check(state, seconds):
+            current["123"]["scheduled_termination_dt"] = (now + timedelta(seconds=seconds)).isoformat()
+            return transition(state, current, now=now)
+        state = check({}, 18000)
+        self.assertEqual(state["pending"], [])
+        state = check(state, 17999)
+        self.assertEqual(state["pending"][0]["reason"], "low_remaining_time")
+        state["pending"].clear()
+        self.assertEqual(check(state, 100)["pending"], [])
+        state = check(state, 20000)
+        state = check(state, 12000)
+        self.assertEqual(len(state["pending"]), 1)
+        state = transition(state, rows("stopped"), now=now)
+        state["pending"].clear()
+        self.assertEqual(len(check(state, 10000)["pending"]), 1)
+
+    def test_missing_invalid_or_nonrunning_deadline_does_not_warn(self):
+        for status, deadline in (("running", None), ("running", "bad"),
+                                 ("running", "2026-09-13T00:00:00"),
+                                 ("pending", "2026-09-13T00:00:00Z")):
+            current = rows(status)
+            current["123"]["scheduled_termination_dt"] = deadline
+            self.assertEqual(transition({}, current)["pending"], [])
+
+    def test_low_time_delivery_retry_and_message_without_start(self):
+        current = rows("running")
+        current["123"]["scheduled_termination_dt"] = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        store = Store({})
+        with self.assertRaises(TimeoutError):
+            process(store, lambda: current, Mock(side_effect=TimeoutError))
+        pending = copy.deepcopy(store.state["pending"])
+        with patch("monitor.post_slack") as post:
+            process(store, lambda: current, send_slack)
+        self.assertIn("남은 시간 5시간 미만", post.call_args.args[0])
+        self.assertIn("종료 예정 시각", post.call_args.args[0])
+        self.assertNotIn("자동 시작", post.call_args.args[0])
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(store.state["pending"], [])
+        self.start.assert_not_called()
+
     def setUp(self):
         # Existing notification tests must never invoke a real workspace start.
         patcher = patch("monitor.start_workspace")
