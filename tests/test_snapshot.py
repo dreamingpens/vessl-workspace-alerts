@@ -12,6 +12,23 @@ def workspace(wid, owner="alice", name="gpu-pod", status="running"):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_unavailable_workspace_reports_positions_without_api_details(self):
+        for status in (401, 403, 404):
+            error = RuntimeError("secret API response")
+            error.status = status
+            with self.subTest(status=status), self.assertRaises(SelectionError) as caught:
+                collect_rows(["123", "alice/gpu-pod"], Mock(side_effect=error),
+                             lambda: [workspace(123)])
+            self.assertIn(f"Target 1, 2: workspace read returned HTTP {status}", str(caught.exception))
+            self.assertNotIn("secret", str(caught.exception))
+            self.assertNotIn("alice", str(caught.exception))
+
+    def test_unexpected_read_error_is_not_misclassified(self):
+        error = RuntimeError("unexpected failure")
+        with self.assertRaises(RuntimeError) as caught:
+            collect_rows(["123"], Mock(side_effect=error), lambda: [])
+        self.assertIs(caught.exception, error)
+
     def test_scheduled_termination_datetime_is_json_serializable(self):
         item = workspace(123)
         item.scheduled_termination_dt = datetime(2026, 9, 13, tzinfo=timezone.utc)

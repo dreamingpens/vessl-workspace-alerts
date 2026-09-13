@@ -104,7 +104,22 @@ def collect_rows(targets, read, list_all):
         ids.update(matches)
     rows = {}
     for wid in sorted(ids):
-        item = read(int(wid))
+        try:
+            item = read(int(wid))
+        except Exception as error:
+            status = getattr(error, "status", None)
+            if status in (401, 403, 404):
+                # Use selector positions, never SDK messages or response bodies.
+                positions = [str(index) for index, target in enumerate(targets, 1)
+                             if target == wid or ("/" in target and any(
+                                 str(candidate.id) == wid
+                                 and f"{candidate.created_by.username}/{candidate.name}" == target
+                                 for candidate in candidates))]
+                raise SelectionError(
+                    f"Target {', '.join(positions)}: workspace read returned HTTP {status}; "
+                    "check access permissions and remove deleted workspaces from the selectors."
+                ) from None
+            raise
         if str(item.id) != wid:
             raise ValueError("Workspace ID mismatch")
         rows[wid] = {"name": item.name, "status": item.status.lower(),
