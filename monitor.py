@@ -130,8 +130,11 @@ def snapshot(targets=None):
         if result.returncode == 2 and result.stderr.startswith("Selection error: "):
             raise SelectionError(result.stderr.strip())
         raise RuntimeError("VESSL lookup failed")
-    rows = json.loads(result.stdout)
-    validate_rows(targets, rows)
+    result = json.loads(result.stdout)
+    rows, skipped = result["rows"], result["skipped"]
+    validate_rows(targets, rows, skipped)
+    for index in sorted(skipped):
+        print(f"Target {index}: workspace not found; skipped this check (registration retained).")
     return rows
 
 

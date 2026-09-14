@@ -66,11 +66,17 @@ def list_candidates(api, organization):
     return list(candidates.values())
 
 
-def validate_rows(targets, rows):
-    if not isinstance(rows, dict) or not rows:
+def validate_rows(targets, rows, skipped=None):
+    skipped = [] if skipped is None else skipped
+    if (not isinstance(skipped, list) or any(type(index) is not int or not 1 <= index <= len(targets)
+                                            for index in skipped) or len(set(skipped)) != len(skipped)):
+        raise ValueError("Invalid skipped target positions")
+    if not isinstance(rows, dict) or (not rows and len(skipped) != len(targets)):
         raise ValueError("Empty workspace response")
     expected = set()
     for index, target in enumerate(targets, 1):
+        if index in skipped:
+            continue
         if "/" in target:
             owner, name = target.split("/", 1)
             matches = [wid for wid, row in rows.items()
@@ -87,37 +93,41 @@ def validate_rows(targets, rows):
             raise ValueError("Invalid workspace response")
 
 
-def collect_rows(targets, read, list_all):
+def collect_rows(targets, read, list_all, skipped=None):
+    skipped = [] if skipped is None else skipped
     candidates = list_all() if any("/" in target for target in targets) else []
     ids = set()
+    positions_by_id = {}
     for index, target in enumerate(targets, 1):
         if "/" not in target:
             ids.add(target)
+            positions_by_id.setdefault(target, []).append(index)
             continue
         owner, name = target.split("/", 1)
         matches = {str(item.id) for item in candidates
                    if item.name == name and item.created_by.username == owner}
         if not matches:
-            raise SelectionError(f"Target {index}: no workspace matches owner/name.")
+            skipped.append(index)
+            continue
         if len(matches) > 1:
             raise SelectionError(f"Target {index}: multiple workspaces match owner/name; use a numeric ID.")
         ids.update(matches)
+        positions_by_id.setdefault(next(iter(matches)), []).append(index)
     rows = {}
     for wid in sorted(ids):
         try:
             item = read(int(wid))
         except Exception as error:
             status = getattr(error, "status", None)
-            if status in (401, 403, 404):
+            if status == 404:
+                skipped.extend(positions_by_id[wid])
+                continue
+            if status in (401, 403):
                 # Use selector positions, never SDK messages or response bodies.
-                positions = [str(index) for index, target in enumerate(targets, 1)
-                             if target == wid or ("/" in target and any(
-                                 str(candidate.id) == wid
-                                 and f"{candidate.created_by.username}/{candidate.name}" == target
-                                 for candidate in candidates))]
+                positions = [str(index) for index in positions_by_id[wid]]
                 raise SelectionError(
                     f"Target {', '.join(positions)}: workspace read returned HTTP {status}; "
-                    "check access permissions and remove deleted workspaces from the selectors."
+                    "check access permissions."
                 ) from None
             raise
         if str(item.id) != wid:
@@ -129,12 +139,13 @@ def collect_rows(targets, read, list_all):
             deadline.isoformat() if isinstance(deadline, datetime) else deadline
         )
     # Re-check owner/name after detail reads in case a workspace was renamed.
-    validate_rows(targets, rows)
+    validate_rows(targets, rows, skipped)
     return rows
 
 
 def main():
     targets = parse_targets(os.environ["VESSL_WORKSPACE_IDS"])
+    skipped = []
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         import vessl
         from vessl.workspace import read_workspace
@@ -145,8 +156,9 @@ def main():
             targets,
             lambda wid: read_workspace(wid, organization_name=organization),
             lambda: list_candidates(vessl.vessl_api, organization),
+            skipped,
         )
-    print(json.dumps(rows))
+    print(json.dumps({"rows": rows, "skipped": skipped}))
 
 
 if __name__ == "__main__":

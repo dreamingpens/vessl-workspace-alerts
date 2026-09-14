@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from monitor import main, post_slack, process, send_slack, start_workspace, transition
+from monitor import main, post_slack, process, send_slack, snapshot, start_workspace, transition
 
 
 def rows(status):
@@ -26,6 +26,23 @@ class Store:
 
 
 class MonitorTests(unittest.TestCase):
+    def test_snapshot_skips_missing_target_and_processes_stopped_target(self):
+        current = {"456": {"name": "other", "owner": "alice", "status": "stopped"}}
+        result = Mock(returncode=0, stdout=json.dumps({"rows": current, "skipped": [1]}))
+        store, send = Store({}), Mock()
+        with patch("monitor.subprocess.run", return_value=result):
+            process(store, lambda: snapshot(["123", "456"]), send)
+        self.start.assert_called_once_with("456")
+        self.assertEqual([event["id"] for event in send.call_args.args[0]], ["456"])
+
+    def test_snapshot_all_missing_has_no_start_or_new_notification(self):
+        result = Mock(returncode=0, stdout=json.dumps({"rows": {}, "skipped": [1]}))
+        store, send = Store({}), Mock()
+        with patch("monitor.subprocess.run", return_value=result):
+            process(store, lambda: snapshot(["123"]), send)
+        self.start.assert_not_called()
+        send.assert_not_called()
+
     def test_low_time_boundary_deduplication_extension_and_restart(self):
         now = datetime(2026, 9, 13, tzinfo=timezone.utc)
         current = rows("running")

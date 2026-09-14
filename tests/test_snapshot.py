@@ -12,8 +12,34 @@ def workspace(wid, owner="alice", name="gpu-pod", status="running"):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_404_skips_both_aliases_and_reads_remaining_target(self):
+        error = RuntimeError("secret API response")
+        error.status = 404
+        read = Mock(side_effect=[error, workspace(456, name="other")])
+        skipped = []
+        result = collect_rows(["123", "alice/gpu-pod", "456"], read,
+                              lambda: [workspace(123)], skipped)
+        self.assertEqual(skipped, [1, 2])
+        self.assertEqual(set(result), {"456"})
+        self.assertEqual(read.call_count, 2)
+
+    def test_all_missing_targets_are_valid(self):
+        error = RuntimeError("private")
+        error.status = 404
+        skipped = []
+        result = collect_rows(["123", "alice/missing"], Mock(side_effect=error),
+                              lambda: [], skipped)
+        self.assertEqual(result, {})
+        self.assertEqual(set(skipped), {1, 2})
+        validate_rows(["123", "alice/missing"], result, skipped)
+
+    def test_invalid_skip_metadata_does_not_hide_missing_results(self):
+        for skipped in ([], [0], [2], [1, 1], [True], "1"):
+            with self.subTest(skipped=skipped), self.assertRaises(ValueError):
+                validate_rows(["123"], {}, skipped)
+
     def test_unavailable_workspace_reports_positions_without_api_details(self):
-        for status in (401, 403, 404):
+        for status in (401, 403):
             error = RuntimeError("secret API response")
             error.status = status
             with self.subTest(status=status), self.assertRaises(SelectionError) as caught:
@@ -61,8 +87,8 @@ class SelectionTests(unittest.TestCase):
         rows = collect_rows(["bob/gpu-pod"], lambda wid: items[1], lambda: items)
         self.assertEqual(set(rows), {"456"})
 
-    def test_missing_and_ambiguous_names_fail_before_detail_reads(self):
-        for items in ([], [workspace(123), workspace(456)]):
+    def test_ambiguous_names_fail_before_detail_reads(self):
+        for items in ([workspace(123), workspace(456)],):
             with self.subTest(items=items):
                 read = Mock()
                 with self.assertRaises(SelectionError):
